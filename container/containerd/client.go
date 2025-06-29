@@ -24,9 +24,14 @@ import (
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
 	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
+	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	versionapi "github.com/containerd/containerd/api/services/version/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
+	cerrdefs "github.com/containerd/errdefs"
+
 	"github.com/containerd/errdefs/pkg/errgrpc"
+	"github.com/docker/docker/errdefs"
+	"github.com/google/cadvisor/container/common"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -38,6 +43,7 @@ import (
 
 type client struct {
 	containerService containersapi.ContainersClient
+	snapshotService  snapshotsapi.SnapshotsClient
 	taskService      tasksapi.TasksClient
 	versionService   versionapi.VersionClient
 }
@@ -46,6 +52,7 @@ type ContainerdClient interface {
 	LoadContainer(ctx context.Context, id string) (*containers.Container, error)
 	TaskPid(ctx context.Context, id string) (uint32, error)
 	Version(ctx context.Context) (string, error)
+	GetContainerLayerSize(ctx context.Context, id string) (common.FsUsage, error)
 }
 
 var (
@@ -103,6 +110,7 @@ func Client(address, namespace string) (ContainerdClient, error) {
 		ctrdClient = &client{
 			containerService: containersapi.NewContainersClient(conn),
 			taskService:      tasksapi.NewTasksClient(conn),
+			snapshotService:  snapshotsapi.NewSnapshotsClient(conn),
 			versionService:   versionapi.NewVersionClient(conn),
 		}
 	})
@@ -130,6 +138,44 @@ func (c *client) TaskPid(ctx context.Context, id string) (uint32, error) {
 		return 0, ErrTaskIsInUnknownState
 	}
 	return response.Process.Pid, nil
+}
+
+func (c *client) GetContainerLayerSize(ctx context.Context, id string) (common.FsUsage, error) {
+	r, err := c.snapshotService.Usage(ctx, &snapshotsapi.UsageRequest{
+		Key: id,
+	})
+	if err != nil {
+		return common.FsUsage{}, errgrpc.ToNative(err)
+	}
+	total := common.FsUsage{
+		BaseUsageBytes: uint64(r.Size),
+		InodeUsage:     uint64(r.Inodes),
+	}
+	r2, err := c.snapshotService.Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key:id})
+	if err != nil {
+		return total, errdefs.System(fmt.Errorf("snapshotter.Stat failed for %s: %w", id, err))
+	}
+	next := r2.Info.Parent
+	for next != "" {
+		usage, err := c.snapshotService.Usage(ctx, &snapshotsapi.UsageRequest{
+			Key: next,
+		})
+		if err != nil {
+			if cerrdefs.IsNotFound(err) {
+				return total, errdefs.NotFound(fmt.Errorf("non-existing ancestor of %s: %w", next, err))
+			}
+			return total, errdefs.System(fmt.Errorf("snapshotter.Usage failed for %s: %w", next, err))
+		}
+		total.TotalUsageBytes += uint64(usage.Size)
+		total.InodeUsage += uint64(usage.Inodes)
+
+		info, err := c.snapshotService.Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key:id})
+		if err != nil {
+			return total, errdefs.System(fmt.Errorf("snapshotter.Stat failed for %s: %w", next, err))
+		}
+		next = info.Info.Parent
+	}
+	return total, nil
 }
 
 func (c *client) Version(ctx context.Context) (string, error) {
