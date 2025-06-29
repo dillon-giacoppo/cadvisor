@@ -16,12 +16,10 @@
 package common
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/google/cadvisor/container/containerd"
 	"github.com/google/cadvisor/fs"
 
 	"k8s.io/klog/v2"
@@ -154,33 +152,4 @@ func (fh *realFsHandler) Usage() FsUsage {
 	fh.RLock()
 	defer fh.RUnlock()
 	return fh.usage
-}
-
-
-type containerdSnapshotterHandler struct {
-	client containerd.ContainerdClient
-	id string
-}
-
-func NewContainerdHandler(client containerd.ContainerdClient, id string) FsHandler {
-	return &containerdSnapshotterHandler{
-		client: client,
-		id: id,
-	}
-}
-
-func (c containerdSnapshotterHandler) Start() {
-
-}
-
-func (c containerdSnapshotterHandler) Usage() FsUsage {
-	usage, err := c.client.GetContainerLayerSize(context.Background(), c.id)
-	if err != nil {
-		klog.Errorf("failed to collect containerd snapshotter stats - %v", err)
-	}
-	return usage
-}
-
-func (c containerdSnapshotterHandler) Stop() {
-
 }

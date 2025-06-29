@@ -28,6 +28,8 @@ import (
 	versionapi "github.com/containerd/containerd/api/services/version/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/google/cadvisor/container/common"
+	"k8s.io/klog/v2"
 
 	"github.com/containerd/errdefs/pkg/errgrpc"
 	"github.com/docker/docker/errdefs"
@@ -205,3 +207,36 @@ func containerFromProto(containerpb *containersapi.Container) *containers.Contai
 		Extensions:  containerpb.Extensions,
 	}
 }
+
+
+type containerdSnapshotterHandler struct {
+	client ContainerdClient
+	id string
+}
+
+func NewContainerdHandler(client ContainerdClient, id string) common.FsHandler {
+	return &containerdSnapshotterHandler{
+		client: client,
+		id: id,
+	}
+}
+
+func (c containerdSnapshotterHandler) Start() {
+
+}
+func (c containerdSnapshotterHandler) Stop() {
+
+}
+func (c containerdSnapshotterHandler) Usage() common.FsUsage {
+	baseUsage, totalUsage, inodeUsage, err := c.client.GetContainerLayerSize(context.Background(), c.id)
+	if err != nil {
+		klog.Errorf("failed to collect containerd snapshotter stats - %v", err)
+	}
+	return common.FsUsage{
+		BaseUsageBytes: uint64(baseUsage),
+		TotalUsageBytes: uint64(totalUsage),
+		InodeUsage: uint64(inodeUsage),
+	}
+}
+
+
