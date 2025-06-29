@@ -247,35 +247,99 @@ func containerFromProto(containerpb *containersapi.Container) *containers.Contai
 	}
 }
 
-
 type containerdSnapshotterHandler struct {
+	sync.RWMutex
+	lastUpdate time.Time
+	usage      common.FsUsage
+	period     time.Duration
+	minPeriod  time.Duration
+
 	client ContainerdClient
-	id string
+	id     string
+
+	// Tells the container to stop.
+	stopChan chan struct{}
 }
 
-func NewContainerdHandler(client ContainerdClient, id string) common.FsHandler {
+func NewContainerdHandler(period time.Duration, client ContainerdClient, id string) common.FsHandler {
 	return &containerdSnapshotterHandler{
-		client: client,
-		id: id,
+		lastUpdate: time.Time{},
+		usage:      common.FsUsage{},
+		period:     period,
+		minPeriod:  period,
+		client:     client,
+		id:         id,
+		stopChan:   make(chan struct{}, 1),
 	}
 }
 
-func (c containerdSnapshotterHandler) Start() {
+const (
+	maxBackoffFactor = 20
+)
 
-}
-func (c containerdSnapshotterHandler) Stop() {
+func (fh *containerdSnapshotterHandler) update() error {
+	baseUsage, totalUsage, inodeUsage, err := fh.client.GetContainerLayerSize(context.Background(), fh.id)
 
-}
-func (c containerdSnapshotterHandler) Usage() common.FsUsage {
-	baseUsage, totalUsage, inodeUsage, err := c.client.GetContainerLayerSize(context.Background(), c.id)
+	// Wait to handle errors until after all operartions are run.
+	// An error in one will not cause an early return, skipping others
+	fh.Lock()
+	defer fh.Unlock()
+	fh.lastUpdate = time.Now()
+	fh.usage.InodeUsage = uint64(inodeUsage)
+	fh.usage.BaseUsageBytes = uint64(baseUsage)
+	fh.usage.TotalUsageBytes = uint64(totalUsage)
+
+	// Combine errors into a single error to return
 	if err != nil {
-		klog.Errorf("failed to collect containerd snapshotter stats - %v", err)
+		return fmt.Errorf("rootDiskErr: %v", err)
 	}
-	return common.FsUsage{
-		BaseUsageBytes: uint64(baseUsage),
-		TotalUsageBytes: uint64(totalUsage),
-		InodeUsage: uint64(inodeUsage),
+	return nil
+}
+
+func (fh *containerdSnapshotterHandler) trackUsage() {
+	longOp := time.Second
+	for {
+		start := time.Now()
+		if err := fh.update(); err != nil {
+			klog.Errorf("failed to collect filesystem stats - %v", err)
+			fh.period = fh.period * 2
+			if fh.period > maxBackoffFactor*fh.minPeriod {
+				fh.period = maxBackoffFactor * fh.minPeriod
+			}
+		} else {
+			fh.period = fh.minPeriod
+		}
+		duration := time.Since(start)
+		if duration > longOp {
+			// adapt longOp time so that message doesn't continue to print
+			// if the long duration is persistent either because of slow
+			// disk or lots of containers.
+			longOp = longOp + time.Second
+			klog.V(2).Infof(
+				"containerd: disk usage and inodes count on following snapshot took %v: %v; will not log again for this container unless duration exceeds %v",
+				duration,
+				[]string{fh.id},
+				longOp,
+			)
+		}
+		select {
+		case <-fh.stopChan:
+			return
+		case <-time.After(fh.period):
+		}
 	}
 }
 
+func (fh *containerdSnapshotterHandler) Start() {
+	go fh.trackUsage()
+}
 
+func (fh *containerdSnapshotterHandler) Stop() {
+	close(fh.stopChan)
+}
+
+func (fh *containerdSnapshotterHandler) Usage() common.FsUsage {
+	fh.RLock()
+	defer fh.RUnlock()
+	return fh.usage
+}

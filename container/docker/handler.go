@@ -241,7 +241,7 @@ func newDockerContainerHandler(
 	if includedMetrics.Has(container.DiskUsageMetrics) {
 		var fsHandler common.FsHandler
 		if storageDriver == ContainerdSnapshotterStorageDriver {
-			fsHandler = containerd.NewContainerdHandler(containerdClient, id)
+			fsHandler = containerd.NewContainerdHandler(common.DefaultPeriod, containerdClient, id)
 		} else {
 			fsHandler = common.NewFsHandler(common.DefaultPeriod, rootfsStorageDir, otherStorageDir, fsInfo)
 		}
