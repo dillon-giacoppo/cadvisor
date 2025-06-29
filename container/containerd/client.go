@@ -23,8 +23,8 @@ import (
 	"time"
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
-	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
+	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
 	versionapi "github.com/containerd/containerd/api/services/version/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	cerrdefs "github.com/containerd/errdefs"
@@ -141,10 +141,17 @@ func (c *client) TaskPid(ctx context.Context, id string) (uint32, error) {
 	return response.Process.Pid, nil
 }
 
-func (c *client) GetContainerLayerSize(ctx context.Context, id string) (baseUsage int64, totalUsage int64, InodeUsage int64, err error) {
-	r, err := c.snapshotService.Usage(ctx, &snapshotsapi.UsageRequest{
-		Key: id,
-	})
+func (c *client) GetContainerLayerSize(
+	ctx context.Context,
+	id string,
+) (baseUsage int64, totalUsage int64, InodeUsage int64, err error) {
+	snapshotter := "overlayfs"
+	r, err := c.snapshotService.Usage(
+		ctx, &snapshotsapi.UsageRequest{
+			Snapshotter: snapshotter,
+			Key:         id,
+		},
+	)
 	if err != nil {
 		return 0, 0, 0, errgrpc.ToNative(err)
 	}
@@ -152,27 +159,59 @@ func (c *client) GetContainerLayerSize(ctx context.Context, id string) (baseUsag
 	totalUsage += r.Size
 	InodeUsage += r.Inodes
 
-	r2, err := c.snapshotService.Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key:id})
+	r2, err := c.snapshotService.Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key: id, Snapshotter: snapshotter})
 	if err != nil {
-		return baseUsage, totalUsage, InodeUsage, errdefs.System(fmt.Errorf("snapshotter.Stat failed for %s: %w", id, err))
+		return baseUsage, totalUsage, InodeUsage, errdefs.System(
+			fmt.Errorf(
+				"snapshotter.Stat failed for %s: %w",
+				id,
+				err,
+			),
+		)
 	}
 	next := r2.Info.Parent
 	for next != "" {
-		usage, err := c.snapshotService.Usage(ctx, &snapshotsapi.UsageRequest{
-			Key: next,
-		})
+		usage, err := c.snapshotService.Usage(
+			ctx, &snapshotsapi.UsageRequest{
+				Snapshotter: snapshotter,
+				Key:         next,
+			},
+		)
 		if err != nil {
 			if cerrdefs.IsNotFound(err) {
-				return baseUsage, totalUsage, InodeUsage, errdefs.NotFound(fmt.Errorf("non-existing ancestor of %s: %w", next, err))
+				return baseUsage, totalUsage, InodeUsage, errdefs.NotFound(
+					fmt.Errorf(
+						"non-existing ancestor of %s: %w",
+						next,
+						err,
+					),
+				)
 			}
-			return baseUsage, totalUsage, InodeUsage, errdefs.System(fmt.Errorf("snapshotter.Usage failed for %s: %w", next, err))
+			return baseUsage, totalUsage, InodeUsage, errdefs.System(
+				fmt.Errorf(
+					"snapshotter.Usage failed for %s: %w",
+					next,
+					err,
+				),
+			)
 		}
 		totalUsage += usage.Size
 		InodeUsage += usage.Inodes
 
-		info, err := c.snapshotService.Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key:id})
+		info, err := c.snapshotService.Stat(
+			ctx, &snapshotsapi.StatSnapshotRequest{
+				Snapshotter: snapshotter,
+				Key:         id,
+			},
+		)
 		if err != nil {
-			return baseUsage, totalUsage, InodeUsage, errdefs.System(fmt.Errorf("snapshotter.Stat failed for %s: %w", next, err))
+			return baseUsage, totalUsage, InodeUsage, errdefs.System(
+				fmt.Errorf(
+					"snapshotter.Stat failed for %s: %w",
+					next,
+					err,
+				),
+			)
 		}
 		next = info.Info.Parent
 	}
